@@ -3,8 +3,8 @@ use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use winit::{
     dpi::LogicalSize,
-    event::{Event, MouseButton, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event::{Event, VirtualKeyCode},
+    event_loop::EventLoop,
     window::WindowBuilder,
 };
 use winit_input_helper::WinitInputHelper;
@@ -34,9 +34,8 @@ fn main() -> Result<(), Error> {
     };
 
     let mut world = World::new(WIDTH, HEIGHT);
-    world.set_rand_cluster();
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, _, _control_flow| {
         if let Event::RedrawRequested(_) = event {
             world.update(pixels.get_frame());
             pixels.render().unwrap();
@@ -47,16 +46,28 @@ fn main() -> Result<(), Error> {
                 paused = !paused;
             }
 
-            if input.mouse_held(0) || input.mouse_released(0) {
-                input.mouse().map(|(x, y)| {
-                    let mouse = pixels.window_pos_to_pixel((x, y)).unwrap();
-                    let (x, y) = mouse;
-                    let index = y * WIDTH + x;
-
-                    world.set_cluster(index);
-                });
-            }
-            
+            [0, 1].into_iter().for_each(|mouse_btn| {
+                if input.mouse_held(mouse_btn) || input.mouse_released(mouse_btn) {
+                    input.mouse().into_iter().for_each(|(x, y)| {
+                        let (x, y) = pixels.window_pos_to_pixel((x, y)).unwrap();
+                        [
+                            y * WIDTH + x,
+                            (y - 1) * WIDTH + x,
+                            (y + 1) * WIDTH + x,
+                            y * WIDTH + x + 1,
+                            y * WIDTH + x - 1,
+                        ]
+                        .into_iter()
+                        .for_each(|index| {
+                            match mouse_btn {
+                                0 => world.set_virus_cluster(index),
+                                1 => world.set_defense_cluster(index),
+                                _ => unreachable!(),
+                            };
+                        });
+                    });
+                }
+            });
 
             if let Some(size) = input.window_resized() {
                 pixels.resize_surface(size.width, size.height);
@@ -67,7 +78,6 @@ fn main() -> Result<(), Error> {
         }
     });
 }
-
 
 struct Nbrs {
     top: Option<Cell>,
@@ -82,7 +92,18 @@ impl Nbrs {
         for item in [self.top, self.right, self.bottom, self.left] {
             item.map(|v| {
                 if v.contagious {
-                    total += v.contagion_rate;
+                    total += thread_rng().gen_range(20..100);
+                }
+            });
+        }
+        total
+    }
+    fn get_defense_total(&self) -> i16 {
+        let mut total = 0;
+        for item in [self.top, self.right, self.bottom, self.left] {
+            item.map(|v| {
+                if v.defend {
+                    total += thread_rng().gen_range(150..250);
                 }
             });
         }
@@ -90,16 +111,14 @@ impl Nbrs {
     }
 }
 
-
 #[derive(Clone, Copy)]
 struct Cell {
     alive: bool,
     infected: bool,
     contagious: bool,
-    contagion_rate: i16,
     days_infected: usize,
     immune: bool,
-
+    defend: bool,
 }
 
 impl Cell {
@@ -108,9 +127,9 @@ impl Cell {
             alive: true,
             contagious: false,
             infected: false,
-            contagion_rate: thread_rng().gen_range(20..100),
             days_infected: 0,
-            immune: false,
+            immune: thread_rng().gen_range(0..100) < 20,
+            defend: thread_rng().gen_range(0..100) < 1,
         }
     }
 
@@ -122,11 +141,19 @@ impl Cell {
         }
     }
 
-    fn update(&mut self) {
+    fn defend(&mut self) {
+        if self.alive {
+            self.defend = true;
+            self.infected = false;
+            self.contagious = false;
+        }
+    }
+
+    fn update_infection(&mut self) {
         if self.infected {
             self.days_infected += 1;
         }
-        if self.days_infected == 15 {
+        if self.days_infected == thread_rng().gen_range(4..13) {
             let numb = thread_rng().gen_range(0..100);
             if numb > 40 {
                 self.alive = false;
@@ -139,7 +166,6 @@ impl Cell {
     }
 }
 
-
 struct World {
     width: usize,
     height: usize,
@@ -149,7 +175,7 @@ struct World {
 const GREEN: [u8; 4] = [60, 179, 113, 255];
 const BLACK: [u8; 4] = [0, 0, 0, 255];
 const RED: [u8; 4] = [255, 0, 0, 255];
-const ORANGE: [u8; 4] = [255, 165, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 255, 255];
 
 impl World {
     fn new(width: usize, height: usize) -> Self {
@@ -160,23 +186,22 @@ impl World {
             width,
         };
 
-        (0..size).for_each(|i| {
+        (0..size).for_each(|_| {
             world.cells.push(Cell::new());
         });
 
         world
     }
 
-    fn set_cluster(&mut self, index: usize) {
-        self.cells[index].infect();
+    fn set_virus_cluster(&mut self, index: usize) {
+        self.cells.get_mut(index).map(|cell| cell.infect());
     }
 
-    fn set_rand_cluster(&mut self) {
-        let index = self.cells.len() / 2 - (WIDTH / 2);
-        self.cells[index].infect();
+    fn set_defense_cluster(&mut self, index: usize) {
+        self.cells.get_mut(index).map(|cell| cell.defend());
     }
 
-    fn set_contagion(&self, index: usize, cell: &mut Cell) {
+    fn get_nbrs(&self, index: usize) -> Nbrs {
         let mut nbrs = Nbrs {
             top: None,
             right: None,
@@ -196,11 +221,26 @@ impl World {
         if index % self.width != 0 {
             nbrs.left = Some(self.cells[index.saturating_sub(1)])
         }
+        nbrs
+    }
+
+    fn set_contagion(&self, index: usize, cell: &mut Cell) {
+        let nbrs = self.get_nbrs(index);
 
         let contagion_total = nbrs.get_contagion_total();
-        let rng: i16 = thread_rng().gen_range(1..200);
-        if rng < (contagion_total) {
-            cell.infect();
+        let rng: i16 = thread_rng().gen_range(67..220);
+        if contagion_total > rng {
+            cell.infect()
+        };
+    }
+
+    fn set_defense(&self, index: usize, cell: &mut Cell) {
+        let nbrs = self.get_nbrs(index);
+        let rng: i16 = thread_rng().gen_range(150..500);
+
+        match () {
+            _ if nbrs.get_defense_total() > rng && nbrs.get_contagion_total() != 0 => cell.defend(),
+            _ => cell.update_infection(),
         }
     }
 
@@ -211,15 +251,16 @@ impl World {
             .zip(frame.par_chunks_exact_mut(4).enumerate())
             .for_each(|(cell, (index, pixel))| {
                 match () {
-                    _ if cell.infected => cell.update(),
+                    _ if cell.infected => self.set_defense(index, cell),
                     _ if cell.alive && !cell.immune => self.set_contagion(index, cell),
                     _ => (),
                 };
 
                 let rgb = match () {
-                    _ if cell.immune => ORANGE,
+                    _ if cell.immune => GREEN,
                     _ if !cell.alive => BLACK,
                     _ if cell.infected => RED,
+                    _ if cell.defend => BLUE,
                     _ => GREEN,
                 };
 
