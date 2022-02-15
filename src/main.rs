@@ -1,19 +1,15 @@
-#![forbid(unsafe_code)]
-
 use log::error;
 use pixels::{Error, Pixels, SurfaceTexture};
-use rand::{thread_rng, Rng, prelude::ThreadRng};
+use rand::{prelude::ThreadRng, thread_rng, Rng};
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use std::{thread, time};
-use rand::distributions::{Distribution, Uniform};
 
-const WIDTH: u32 = 1000;
-const HEIGHT: u32 = 1000;
+const WIDTH: usize = 500;
+const HEIGHT: usize = 500;
 
 fn main() -> Result<(), Error> {
     let event_loop = EventLoop::new();
@@ -31,63 +27,54 @@ fn main() -> Result<(), Error> {
     let mut pixels = {
         let window_size = window.inner_size();
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH, HEIGHT, surface_texture)?
+        Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture)?
     };
 
-    let mut world = World::new(WIDTH as usize, HEIGHT as usize);
-    let rand: usize = world.cells.len() / 2 - (WIDTH / 2) as usize;
-    world.cells.get_mut(rand ).unwrap().infect();
+    let mut world = World::new(WIDTH, HEIGHT);
+    world.set_rand_cluster();
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                *control_flow = ControlFlow::Exit
-            }
-            Event::MainEventsCleared => {
-                window.request_redraw();
-            }
-            Event::RedrawRequested(_) => {
-                world.update(pixels.get_frame());
-                match pixels.render() {
-                    Ok(_) => (),
-                    Err(e) => {
-                        error!("pixels.render() failed: {}", e);
-                        *control_flow = ControlFlow::Exit;
-                        return;
-                    }
+    event_loop.run(move |event, _, control_flow| match event {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => *control_flow = ControlFlow::Exit,
+        Event::MainEventsCleared => {
+            window.request_redraw();
+        }
+        Event::RedrawRequested(_) => {
+            world.update(pixels.get_frame());
+            match pixels.render() {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("pixels.render() failed: {}", e);
+                    *control_flow = ControlFlow::Exit;
+                    return;
                 }
             }
-            _ => (),
         }
+        _ => (),
     });
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 struct Cell {
     alive: bool,
     infected: bool,
     contagious: bool,
-    contagion_rate: usize,
+    contagion_rate: i16,
     days_infected: usize,
-    rng: ThreadRng
+    immune: bool,
 }
 
 impl Cell {
     fn default() -> Self {
-        let contagion_rate: usize = thread_rng(). gen_range(20..100);
         Cell {
             alive: true,
             contagious: false,
             infected: false,
-            contagion_rate,
+            contagion_rate: thread_rng().gen_range(20..100),
             days_infected: 0,
-            rng: thread_rng()
+            immune: false,
         }
     }
 
@@ -97,18 +84,44 @@ impl Cell {
         self.days_infected = 0;
     }
 
-    fn update(&mut self, rng: &ThreadRng)  {
+    fn update(&mut self, rng: &mut ThreadRng) {
         if self.infected {
             self.days_infected += 1;
         }
         if self.days_infected == 15 {
-            let numb = self.rng.gen_range(0..100);
-            if numb > 50 {
+            let numb = rng.gen_range(0..100);
+            if numb > 40 {
                 self.alive = false;
+            } else {
+                self.immune = true;
+                self.infected = false;
+                self.contagious = false;
             }
         }
     }
 }
+
+struct Nbrs {
+    top: Option<Cell>,
+    right: Option<Cell>,
+    bottom: Option<Cell>,
+    left: Option<Cell>,
+}
+
+impl Nbrs {
+    fn get_contagion_total(&self) -> i16 {
+        let mut total = 0;
+        for item in [self.top, self.right, self.bottom, self.left] {
+            item.map(|v| {
+                if v.contagious {
+                    total += v.contagion_rate;
+                }
+            });
+        }
+        total
+    }
+}
+
 struct World {
     width: usize,
     height: usize,
@@ -116,16 +129,9 @@ struct World {
     rng: ThreadRng,
 }
 
-struct Nbrs {
-    top: usize,
-    right: usize,
-    bottom: usize,
-    left: usize,
-}
-
 impl World {
     fn new(width: usize, height: usize) -> Self {
-        let size = width * height ;
+        let size = width * height;
         World {
             cells: vec![Cell::default(); size],
             height,
@@ -134,49 +140,67 @@ impl World {
         }
     }
 
-    fn get_nbrs(&mut self, index: usize) -> Nbrs {
-        let get_rate = |i: usize, condition| {
-            if condition {
-                let cell = self.cells.get(i).unwrap();
-                if cell.contagious {
-                    cell.contagion_rate
-                } else {
-                    0 
-                }
-            } else {
-                0
-            }
-        };
-
-        Nbrs {
-            top: get_rate(index.saturating_sub(self.width), index > self.width -1 ),
-            right: get_rate(index.saturating_add(1), ((index+1) % self.width != 0) && index+1 < (self.width * self.height -1)),
-            bottom: get_rate(index.saturating_add(self.width), index +1 < (self.width) * (self.height - 1)),
-            left: get_rate(index.saturating_sub(1), index != 0 && (index  % self.width) != 0),
-        }
+    fn set_rand_cluster(&mut self) {
+        let rand = self.cells.len() / 2 - (WIDTH / 2);
+        self.cells[rand].infect();
     }
 
-    fn get_updated_cell_rgb(&mut self, index: usize) -> &[u8] {
-        let nbrs = self.get_nbrs(index);
-        let cell = self.cells.get_mut(index).unwrap();
-        cell.update(&self.rng);
-        if cell.alive && !cell.infected {
-            let rng: u16 = self.rng.gen_range(1..150);
-            if rng < (nbrs.top + nbrs.right + nbrs.bottom + nbrs.left) as u16 {
+    fn get_nbrs(&self, index: usize) -> Nbrs {
+        let mut nbrs = Nbrs {
+            top: None,
+            right: None,
+            bottom: None,
+            left: None,
+        };
+
+        if index > self.width - 1 {
+            nbrs.top = Some(self.cells[index.saturating_sub(self.width)])
+        }
+        if (index + 1) % self.width != 0 && index + 1 < (self.width * self.height - 1) {
+            nbrs.right = Some(self.cells[index + 1])
+        }
+        if index + 1 < self.width * (self.height - 1) {
+            nbrs.bottom = Some(self.cells[index + self.width])
+        }
+        if index != 0 && (index % self.width) != 0 {
+            nbrs.left = Some(self.cells[index.saturating_sub(1)])
+        }
+
+        nbrs
+    }
+
+    fn get_cell_rgb(&mut self, cell: &mut Cell, index: usize) -> &[u8] {
+        if cell.infected {
+            cell.update(&mut self.rng);
+        } else {
+            let nbrs = self.get_nbrs(index);
+            let contagion_total = nbrs.get_contagion_total();
+            let rng: i16 = self.rng.gen_range(1..200);
+            if rng < (contagion_total) {
                 cell.infect();
             }
         }
+
         match () {
-            _ if !cell.alive => &[0, 0, 0, 0xff],
             _ if cell.infected => &[255, 0, 0, 0xff],
-            _ => &[0, 255, 0, 0xff],
+            _ if !cell.alive => &[0, 0, 0, 0xff],
+            _ if cell.immune => &[255, 165, 0, 0xff],
+            _ => &[60, 179, 113, 0xff],
         }
     }
 
     fn update(&mut self, frame: &mut [u8]) {
         for (index, pixel) in frame.chunks_exact_mut(4).enumerate() {
-            let rgb = self.get_updated_cell_rgb(index);
-            pixel.copy_from_slice(rgb);
+            let mut cell = self.cells[index];
+            {
+                let rgb = match () {
+                    _ if cell.immune => &[255, 165, 0, 0xff],
+                    _ if !cell.alive => &[0, 0, 0, 0xff],
+                    _ => self.get_cell_rgb(&mut cell, index),
+                };
+                pixel.copy_from_slice(rgb);
+            }
+            self.cells[index] = cell;
         }
     }
 }
